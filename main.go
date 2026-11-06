@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
+	"unsafe"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
@@ -30,7 +32,96 @@ var (
 	currentQR  barcode.Barcode
 )
 
+// ---- log.dll binding ----
+var (
+	logDll                  *syscall.DLL
+	fnCreateIsolate        uintptr
+	fnDetachIsolate        uintptr
+	fnLogInit              uintptr
+	fnLogWrite             uintptr
+	fnLogShutdown          uintptr
+	fnLogCacheLookup       uintptr
+	fnLogCachePut          uintptr
+	logThread              uintptr
+)
+
+func initLog() {
+	dllPath := `C:\wpjc\md\native\DLL\core\log.dll`
+	if _, err := os.Stat(dllPath); err != nil {
+		// log.dll not found, run without logging
+		return
+	}
+	logDll = syscall.MustLoadDLL(dllPath)
+	fnCreateIsolate = logDll.MustFindProc("graal_create_isolate").Addr()
+	fnDetachIsolate = logDll.MustFindProc("graal_detach_all_threads_and_tear_down_isolate").Addr()
+	fnLogInit = logDll.MustFindProc("log_init").Addr()
+	fnLogWrite = logDll.MustFindProc("log_write").Addr()
+	fnLogShutdown = logDll.MustFindProc("log_shutdown").Addr()
+	fnLogCacheLookup = logDll.MustFindProc("log_cache_lookup").Addr()
+	fnLogCachePut = logDll.MustFindProc("log_cache_put").Addr()
+
+	var isolate, thread uintptr
+	ret, _, _ := syscall.SyscallN(fnCreateIsolate, 0,
+		uintptr(unsafe.Pointer(&isolate)),
+		uintptr(unsafe.Pointer(&thread)))
+	if ret != 0 {
+		return
+	}
+	logThread = thread
+	baseDir, _ := filepath.Abs(".")
+	syscall.SyscallN(fnLogInit, logThread,
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(baseDir))))
+}
+
+func shutdownLog() {
+	if logThread == 0 {
+		return
+	}
+	syscall.SyscallN(fnLogShutdown, logThread)
+	syscall.SyscallN(fnDetachIsolate, logThread)
+}
+
+func logWrite(op, result string) {
+	if logThread == 0 {
+		return
+	}
+	syscall.SyscallN(fnLogWrite, logThread,
+		uintptr(unsafe.Pointer(syscall.StringBytePtr("qrscanner"))),
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(op))),
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(result))))
+}
+
+// cacheLookup returns cached result or empty string on miss
+func cacheLookup(op, params string) string {
+	if logThread == 0 {
+		return ""
+	}
+	buf := make([]byte, 65536)
+	ret, _, _ := syscall.SyscallN(fnLogCacheLookup, logThread,
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(op))),
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(params))),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)))
+	if ret < 0 {
+		return ""
+	}
+	return string(buf[:ret])
+}
+
+func cachePut(op, params, result string) {
+	if logThread == 0 {
+		return
+	}
+	syscall.SyscallN(fnLogCachePut, logThread,
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(op))),
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(params))),
+		uintptr(unsafe.Pointer(syscall.StringBytePtr(result))))
+}
+
 func main() {
+	initLog()
+	defer shutdownLog()
+
 	MainWindow{
 		AssignTo: &mw,
 		Title:    "QR Scanner",
@@ -130,6 +221,15 @@ func main() {
 // ---- Scan logic ----
 
 func decodeFile(path string) {
+	// Check cache first
+	cached := cacheLookup("scan_image", path)
+	if cached != "" {
+		scanResult.SetText("(cache hit)\nDecoded: " + cached + "\n")
+		go processScanResult(cached)
+		logWrite("scan", "cache_hit:"+path)
+		return
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		walk.MsgBox(mw, "Error", err.Error(), walk.MsgBoxIconError)
@@ -141,7 +241,11 @@ func decodeFile(path string) {
 		walk.MsgBox(mw, "Error", "Cannot decode image: "+err.Error(), walk.MsgBoxIconError)
 		return
 	}
-	decodeImage(img)
+	text := decodeImage(img)
+	if text != "" {
+		cachePut("scan_image", path, text)
+		logWrite("scan", path+" -> "+text)
+	}
 }
 
 func decodeScreenshot() {
@@ -167,23 +271,22 @@ Write-Output $tmp
 	decodeFile(tmpPath)
 }
 
-func decodeImage(img image.Image) {
+// decodeImage tries QR then 1D barcodes; returns decoded text or ""
+func decodeImage(img image.Image) string {
 	bitmap, err := gozxing.NewBinaryBitmapFromImage(img)
 	if err != nil {
 		scanResult.SetText("Failed to process image: " + err.Error())
-		return
+		return ""
 	}
 	hints := map[gozxing.DecodeHintType]interface{}{
 		gozxing.DecodeHintType_TRY_HARDER: true,
 	}
 
-	// Try QR code first
 	var result *gozxing.Result
 	qrReader := qrcode.NewQRCodeReader()
 	if res, err := qrReader.Decode(bitmap, hints); err == nil {
 		result = res
 	} else {
-		// Try common 1D barcodes (each is a full gozxing.Reader)
 		onedReaders := []gozxing.Reader{
 			oned.NewEAN13Reader(),
 			oned.NewEAN8Reader(),
@@ -204,12 +307,13 @@ func decodeImage(img image.Image) {
 
 	if result == nil {
 		scanResult.SetText("No barcode found (tried QR + EAN13/EAN8/UPC-A/UPC-E/Code128/Code39/Codabar/ITF)")
-		return
+		return ""
 	}
 	text := result.GetText()
 	format := result.GetBarcodeFormat()
 	scanResult.SetText(fmt.Sprintf("Format: %s\nDecoded: %s\n", format.String(), text))
 	go processScanResult(text)
+	return text
 }
 
 func processScanResult(text string) {
@@ -261,6 +365,17 @@ func generateQR(input string) {
 		walk.MsgBox(mw, "Error", "Input is empty", walk.MsgBoxIconWarning)
 		return
 	}
+
+	// Check cache
+	cached := cacheLookup("generate", input)
+	if cached != "" {
+		genPathLbl.SetText("(cache hit: " + cached + ")")
+		logWrite("generate", "cache_hit:"+input)
+		// still regenerate image from cached text
+		doGenerateQR(cached, true)
+		return
+	}
+
 	var data string
 	if fi, err := os.Stat(input); err == nil && !fi.IsDir() {
 		b, err := os.ReadFile(input)
@@ -274,6 +389,13 @@ func generateQR(input string) {
 	} else {
 		data = input
 	}
+
+	doGenerateQR(data, false)
+	cachePut("generate", input, data)
+	logWrite("generate", input+" -> "+fmt.Sprintf("%d chars", len(data)))
+}
+
+func doGenerateQR(data string, isCached bool) {
 	qrCode, err := qr.Encode(data, qr.M, qr.Auto)
 	if err != nil {
 		walk.MsgBox(mw, "Error", "QR encode failed: "+err.Error(), walk.MsgBoxIconError)
@@ -286,7 +408,6 @@ func generateQR(input string) {
 	}
 	currentQR = scaled
 
-	// Save to temp PNG then load into ImageView
 	tmp := filepath.Join(os.TempDir(), "qr_preview.png")
 	f, err := os.Create(tmp)
 	if err != nil {
