@@ -6,3 +6,6 @@ log/
 *.obj
 run_out.txt
 run_err.txt
+
+# per-machine settings written by config.dll
+resources/cmd/settings.tmmf
