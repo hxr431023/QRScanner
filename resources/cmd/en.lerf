@@ -1,0 +1,56 @@
+LERF.utf8
+QRScanner.V1.0.0
+
+0
+# 主窗口与页签
+<1>QR Scanner<1>
+<2>Scan<2>
+<3>Generate<3>
+<4>Settings<4>
+# 按钮
+<5>Open image file...<5>
+<6>Screenshot and decode<6>
+<7>Choose file...<7>
+<8>Generate QR<8>
+<9>Save PNG...<9>
+# 标签
+<10>Result:<10>
+<11>Text or file to encode:<11>
+<12>Output format:<12>
+<13>Language:<13>
+<14>Enable logging and result cache<14>
+# 对话框
+<15>Select QR / barcode image<15>
+<16>Select file to encode<16>
+<17>Save QR code as PNG<17>
+# 消息
+<18>Error<18>
+<19>QR Scanner startup error<19>
+<20>Saved<20>
+<21>Saved to: {0}<21>
+<22>Input is empty<22>
+<23>No QR code generated yet<23>
+<24>Screenshot failed: {0}<24>
+<25>Cannot decode image: {0}<25>
+<26>Cannot read file: {0}<26>
+<27>QR encode failed: {0}<27>
+<28>Bad QR image type<28>
+<29>Create failed: {0}<29>
+<30>Language saved. Restart the app to apply it.<30>
+# 扫码
+<31>No barcode found (tried QR + EAN13/EAN8/UPC-A/UPC-E/Code128/Code39/Codabar/ITF)<31>
+<32>Format: {0}<32>
+<33>Decoded: {0}<33>
+<34>(cache hit)<34>
+<35>-> Opened in browser<35>
+<36>-> Opened folder: {0}<36>
+<37>-> Base32 decoded:<37>
+<38>-> Plain text<38>
+<39>Failed to process image: {0}<39>
+# 生成
+<40>File: {0} ({1} bytes -> base32 {2} chars)<40>
+<41>(cache hit: {0})<41>
+# 状态
+<42>ready<42>
+<43>not found<43>
+<44>Base dir: {0}\r\nlog.dll (logging + cache): {1}\r\nconfig.dll (settings, TMMF): {2}\r\ntmmf.dll (format parser): {3}\r\nlerf.dll (key-value parser): {4}\r\n\r\nSettings are saved to resources/cmd/settings.tmmf.<44>
