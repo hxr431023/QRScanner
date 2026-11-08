@@ -45,20 +45,62 @@ var (
 	logThread              uintptr
 )
 
+// exePath returns the absolute path of the running executable.
+func exePath() string {
+	p, err := os.Executable()
+	if err != nil {
+		return "."
+	}
+	return p
+}
+
+// initLog loads log.dll lazily. Any failure just disables logging/caching;
+// it must never take the GUI down with it.
 func initLog() {
-	dllPath := `C:\wpjc\md\native\DLL\core\log.dll`
-	if _, err := os.Stat(dllPath); err != nil {
-		// log.dll not found, run without logging
+	defer func() {
+		if r := recover(); r != nil {
+			logThread = 0
+		}
+	}()
+
+	// Look for log.dll next to the exe first, then fall back to the user's DLL library.
+	candidates := []string{
+		filepath.Join(filepath.Dir(exePath()), "log.dll"),
+		`C:\wpjc\md\native\DLL\core\log.dll`,
+	}
+	var dllPath string
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			dllPath = p
+			break
+		}
+	}
+	if dllPath == "" {
+		return // no log.dll anywhere: run without logging
+	}
+
+	dll, err := syscall.LoadDLL(dllPath)
+	if err != nil {
 		return
 	}
-	logDll = syscall.MustLoadDLL(dllPath)
-	fnCreateIsolate = logDll.MustFindProc("graal_create_isolate").Addr()
-	fnDetachIsolate = logDll.MustFindProc("graal_detach_all_threads_and_tear_down_isolate").Addr()
-	fnLogInit = logDll.MustFindProc("log_init").Addr()
-	fnLogWrite = logDll.MustFindProc("log_write").Addr()
-	fnLogShutdown = logDll.MustFindProc("log_shutdown").Addr()
-	fnLogCacheLookup = logDll.MustFindProc("log_cache_lookup").Addr()
-	fnLogCachePut = logDll.MustFindProc("log_cache_put").Addr()
+	proc := func(name string) uintptr {
+		p, err := dll.FindProc(name)
+		if err != nil {
+			return 0
+		}
+		return p.Addr()
+	}
+	fnCreateIsolate = proc("graal_create_isolate")
+	fnDetachIsolate = proc("graal_detach_all_threads_and_tear_down_isolate")
+	fnLogInit = proc("log_init")
+	fnLogWrite = proc("log_write")
+	fnLogShutdown = proc("log_shutdown")
+	fnLogCacheLookup = proc("log_cache_lookup")
+	fnLogCachePut = proc("log_cache_put")
+	if fnCreateIsolate == 0 || fnLogInit == 0 {
+		return
+	}
+	logDll = dll
 
 	var isolate, thread uintptr
 	ret, _, _ := syscall.SyscallN(fnCreateIsolate, 0,
@@ -122,7 +164,7 @@ func main() {
 	initLog()
 	defer shutdownLog()
 
-	MainWindow{
+	win := MainWindow{
 		AssignTo: &mw,
 		Title:    "QR Scanner",
 		Size:     Size{Width: 600, Height: 500},
@@ -213,9 +255,20 @@ func main() {
 				},
 			},
 		},
-	}.Create()
+	}
+
+	if err := win.Create(); err != nil {
+		showFatal("Create failed: " + err.Error())
+		return
+	}
 
 	mw.Run()
+}
+
+// showFatal displays a startup error even when the GUI is unavailable.
+func showFatal(msg string) {
+	os.WriteFile(filepath.Join(os.TempDir(), "qrscanner_crash.txt"), []byte(msg), 0644)
+	walk.MsgBox(nil, "QR Scanner startup error", msg, walk.MsgBoxIconError)
 }
 
 // ---- Scan logic ----

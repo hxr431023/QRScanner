@@ -1,0 +1,8 @@
+# runtime data written by log.dll
+cache/
+log/
+
+# build / debug leftovers
+*.obj
+run_out.txt
+run_err.txt
