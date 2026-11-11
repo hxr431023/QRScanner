@@ -1,174 +1,89 @@
 package main
 
-// dlls.go — bindings for the local DLL library (log / config / tmmf / lerf).
+// dlls.go — thin application layer over the reusable `native` package.
+//
+// The FFI plumbing (isolate handling, argument lifetime, status-code buffers),
+// the TMMF settings store, the log with its result cache and the LERF parser all
+// live in `qrscanner/native` so another project can copy that directory and get
+// the same behaviour. This file only binds them to this app.
 //
 // Every DLL is loaded from the directory that contains qrscanner.exe. Nothing is
 // hard-coded to an absolute path, so a cloned copy of this repo runs as-is.
 // Missing DLLs never abort startup: each capability simply degrades to "off".
-//
-// FFI note: arguments are wrapped in cArg so their backing memory stays reachable
-// until after the syscall returns (runtime.KeepAlive). Passing a bare uintptr
-// would let the GC reclaim the string mid-call.
 
 import (
 	"os"
 	"path/filepath"
-	"runtime"
-	"strings"
-	"syscall"
-	"unsafe"
+
+	"qrscanner/native"
 )
 
 // appDir is the directory holding qrscanner.exe — the base dir for all DLL
 // lookups and for the log/cache/config files they write.
-func appDir() string {
-	p, err := os.Executable()
-	if err != nil {
-		if wd, e := os.Getwd(); e == nil {
-			return wd
-		}
-		return "."
-	}
-	return filepath.Dir(p)
-}
+func appDir() string { return native.AppDir() }
 
 func appPath(name string) string { return filepath.Join(appDir(), name) }
 
-// ---- FFI argument handling ----
+// ---- tmmf.dll ----
 
-type cArg struct {
-	sp  *byte  // C string
-	buf []byte // output buffer
-	num uintptr
+var tmmfDLL *native.DLL
+
+var tmmfExports = []string{
+	"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
+	"tmmf_read_all", "tmmf_read_tag", "tmmf_search",
+	"tmmf_list_tags", "tmmf_line_count", "tmmf_write_tag",
 }
 
-func aStr(s string) *cArg {
-	p, _ := syscall.BytePtrFromString(s)
-	return &cArg{sp: p}
-}
+func initTmmf() { tmmfDLL = native.Load(appDir(), "tmmf.dll", tmmfExports) }
 
-func aBuf(b []byte) *cArg { return &cArg{buf: b} }
-func aNum(n uintptr) *cArg { return &cArg{num: n} }
-
-func (a *cArg) ptr() uintptr {
-	switch {
-	case a.sp != nil:
-		return uintptr(unsafe.Pointer(a.sp))
-	case len(a.buf) > 0:
-		return uintptr(unsafe.Pointer(&a.buf[0]))
-	default:
-		return a.num
-	}
-}
-
-// graalDLL is a loaded GraalVM native-image DLL plus its isolate thread handle.
-type graalDLL struct {
-	dll    *syscall.DLL
-	thread uintptr
-	proc   map[string]uintptr
-}
-
-var exportNames = map[string][]string{
-	"log.dll": {
-		"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
-		"log_init", "log_write", "log_write_end", "log_shutdown",
-		"log_set_enabled", "log_is_enabled", "log_size", "log_clear_all",
-		"log_cache_lookup", "log_cache_put",
-	},
-	"config.dll": {
-		"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
-		"config_init", "config_load_settings", "config_save_settings",
-		"config_get_setting", "config_set_setting", "config_has_setting",
-		"config_remove_setting", "config_get_thread_mode", "config_set_thread_mode",
-	},
-	"tmmf.dll": {
-		"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
-		"tmmf_read_all", "tmmf_read_tag", "tmmf_search",
-		"tmmf_list_tags", "tmmf_line_count", "tmmf_write_tag",
-	},
-	"lerf.dll": {
-		"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
-		"lerf_load", "lerf_get", "lerf_get_from_file", "lerf_get_multi",
-		"lerf_list_all", "lerf_validate", "lerf_key_count",
-	},
-}
-
-// loadGraalDLL loads <name> from the app directory and creates its isolate.
-func loadGraalDLL(name string) *graalDLL {
-	path := appPath(name)
-	if _, err := os.Stat(path); err != nil {
-		return nil
-	}
-	dll, err := syscall.LoadDLL(path)
-	if err != nil {
-		return nil
-	}
-	g := &graalDLL{dll: dll, proc: map[string]uintptr{}}
-	for _, n := range exportNames[name] {
-		if p, err := dll.FindProc(n); err == nil {
-			g.proc[n] = p.Addr()
-		}
-	}
-	create := g.proc["graal_create_isolate"]
-	if create == 0 {
-		return nil
-	}
-	var isolate, thread uintptr
-	if ret, _, _ := syscall.SyscallN(create, 0,
-		uintptr(unsafe.Pointer(&isolate)),
-		uintptr(unsafe.Pointer(&thread))); ret != 0 {
-		return nil
-	}
-	g.thread = thread
-	return g
-}
-
-// invoke calls a DLL export with the isolate thread as the first argument.
-func (g *graalDLL) invoke(name string, as ...*cArg) uintptr {
-	if g == nil || g.thread == 0 {
-		return 0
-	}
-	addr := g.proc[name]
-	if addr == 0 {
-		return 0
-	}
-	args := make([]uintptr, 0, len(as)+1)
-	args = append(args, g.thread)
-	for _, a := range as {
-		args = append(args, a.ptr())
-	}
-	r1, _, _ := syscall.SyscallN(addr, args...)
-	// Backing memory of every argument must outlive the call.
-	runtime.KeepAlive(as)
-	return r1
-}
-
-func (g *graalDLL) close() {
-	if g == nil || g.thread == 0 {
-		return
-	}
-	g.invoke("graal_detach_all_threads_and_tear_down_isolate")
-	g.thread = 0
-}
-
-// out reads a NUL-terminated string written into buf by a DLL call.
-// These DLLs return a status code, not a length, so the buffer is scanned to its
-// terminator. The buffer is zero-initialised, so a failed call yields "".
-func (a *cArg) out() string {
-	if len(a.buf) == 0 {
+// tmmfSearch returns every entry on the line matching keyword, or "".
+func tmmfSearch(file, keyword string) string {
+	if !tmmfDLL.Valid() {
 		return ""
 	}
-	for i := 0; i < len(a.buf); i++ {
-		if a.buf[i] == 0 {
-			return string(a.buf[:i])
-		}
+	if _, err := os.Stat(appPath(file)); err != nil {
+		return ""
 	}
-	return string(a.buf)
+	buf := make([]byte, 4096)
+	out := native.Buf(buf)
+	tmmfDLL.Invoke("tmmf_search", native.Str(appPath(file)), native.Str(keyword), out, native.Num(uintptr(len(buf))))
+	return out.Out()
+}
+
+func shutdownTmmf() {
+	if tmmfDLL != nil {
+		tmmfDLL.Close()
+	}
+}
+
+// ---- lerf.dll ----
+
+var lerfDLL *native.DLL
+
+var lerfExports = []string{
+	"graal_create_isolate", "graal_detach_all_threads_and_tear_down_isolate",
+	"lerf_load", "lerf_get", "lerf_get_from_file", "lerf_get_multi",
+	"lerf_list_all", "lerf_validate", "lerf_key_count",
+}
+
+func initLerf() {
+	lerfDLL = native.Load(appDir(), "lerf.dll", lerfExports)
+	if lerfDLL.Valid() {
+		// format check only; entry lookup is done by the native parser because
+		// this build of lerf.dll echoes the key instead of returning its text
+		lerfDLL.Invoke("lerf_validate", native.Str(langPath("en")))
+	}
+}
+
+func shutdownLerf() {
+	if lerfDLL != nil {
+		lerfDLL.Close()
+	}
 }
 
 // ---- log.dll ----
 
-var logDLL *graalDLL
+var logStore *native.Log
 
 var (
 	logEnabled   = true
@@ -176,57 +91,50 @@ var (
 )
 
 func initLog() {
-	logDLL = loadGraalDLL("log.dll")
-	if logDLL == nil {
+	logStore = native.NewLog(appDir())
+	if logStore == nil {
 		return
 	}
-	logDLL.invoke("log_init", aStr(appDir()))
+	logStore.SetEnabled(logEnabled)
 }
 
 func shutdownLog() {
-	if logDLL == nil {
-		return
+	if logStore != nil {
+		logStore.Close()
 	}
-	logDLL.invoke("log_shutdown")
-	logDLL.close()
 }
 
 func logWrite(op, result string) {
-	if !logEnabled {
+	if !logEnabled || logStore == nil {
 		return
 	}
-	logDLL.invoke("log_write", aStr("qrscanner"), aStr(op), aStr(result))
+	logStore.Write("qrscanner", op, result)
 }
 
 // cacheLookup returns the cached result, or "" on miss / unavailable.
 func cacheLookup(op, params string) string {
-	if logDLL == nil {
+	if logStore == nil {
 		return ""
 	}
-	buf := make([]byte, 65536)
-	out := aBuf(buf)
-	logDLL.invoke("log_cache_lookup", aStr(op), aStr(params), out, aNum(uintptr(len(buf))))
-	return out.out()
+	return logStore.Lookup(op, params)
 }
 
 func cachePut(op, params, result string) {
-	if !logEnabled {
+	if !logEnabled || logStore == nil {
 		return
 	}
-	logDLL.invoke("log_cache_put", aStr(op), aStr(params), aStr(result))
+	logStore.Put(op, params, result)
 }
 
 // ---- config.dll (settings persisted in TMMF format) ----
 
-var cfgDLL *graalDLL
+var cfgStore *native.Config
 
 func initConfig() {
-	cfgDLL = loadGraalDLL("config.dll")
-	if cfgDLL == nil {
+	cfgStore = native.NewConfig(appDir())
+	if cfgStore == nil {
 		return
 	}
-	cfgDLL.invoke("config_init", aStr(appDir()))
-	cfgDLL.invoke("config_load_settings")
 	if v := configGet("log_enabled"); v != "" {
 		logEnabled = v == "1" || v == "true"
 	}
@@ -239,95 +147,40 @@ func initConfig() {
 }
 
 func configGet(key string) string {
-	if cfgDLL == nil {
+	if cfgStore == nil {
 		return ""
 	}
-	buf := make([]byte, 4096)
-	out := aBuf(buf)
-	cfgDLL.invoke("config_get_setting", aStr(key), out, aNum(uintptr(len(buf))))
-	return out.out()
+	return cfgStore.Get(key)
 }
 
 func configSet(key, value string) {
-	cfgDLL.invoke("config_set_setting", aStr(key), aStr(value))
+	if cfgStore == nil {
+		return
+	}
+	cfgStore.Set(key, value)
 }
 
-func configSave() { cfgDLL.invoke("config_save_settings") }
+func configSave() {
+	if cfgStore == nil {
+		return
+	}
+	cfgStore.Save()
+}
 
 func shutdownConfig() {
-	if cfgDLL != nil {
-		cfgDLL.close()
-	}
-}
-
-// ---- tmmf.dll ----
-
-var tmmfDLL *graalDLL
-
-func initTmmf() { tmmfDLL = loadGraalDLL("tmmf.dll") }
-
-// tmmfSearch returns every entry on the line matching keyword, or "".
-func tmmfSearch(file, keyword string) string {
-	if tmmfDLL == nil {
-		return ""
-	}
-	if _, err := os.Stat(appPath(file)); err != nil {
-		return ""
-	}
-	buf := make([]byte, 4096)
-	out := aBuf(buf)
-	tmmfDLL.invoke("tmmf_search", aStr(appPath(file)), aStr(keyword), out, aNum(uintptr(len(buf))))
-	return out.out()
-}
-
-func shutdownTmmf() {
-	if tmmfDLL != nil {
-		tmmfDLL.close()
-	}
-}
-
-// ---- lerf.dll ----
-
-var lerfDLL *graalDLL
-
-func initLerf() {
-	lerfDLL = loadGraalDLL("lerf.dll")
-	if lerfDLL != nil {
-		// format check only; entry lookup is done by parseLerf
-		lerfDLL.invoke("lerf_validate", aStr(langPath("en")))
-	}
-}
-
-// lerfGetFromFile reads a single key from a LERF file ("" when unavailable).
-func lerfGetFromFile(file, key string) string {
-	if lerfDLL == nil {
-		return ""
-	}
-	if _, err := os.Stat(appPath(file)); err != nil {
-		return ""
-	}
-	buf := make([]byte, 1024)
-	out := aBuf(buf)
-	lerfDLL.invoke("lerf_get_from_file", aStr(appPath(file)), aStr(key), out, aNum(uintptr(len(buf))))
-	return out.out()
-}
-
-func shutdownLerf() {
-	if lerfDLL != nil {
-		lerfDLL.close()
+	if cfgStore != nil {
+		cfgStore.Close()
 	}
 }
 
 // ---- i18n via LERF ----
 //
 // Language files are standard LERF documents (`<id>text<id>` entries) stored under
-// resources/cmd/. lerf.dll is loaded and its lerf_validate used as a format check;
-// entry lookup itself is done here because this build of lerf.dll only echoes the
-// requested key back instead of the stored text.
+// resources/cmd/. The parser lives in the native package so other projects reuse it.
 
 var (
-	currentLang = "en"                    // en | zh
-	langTable   = map[string]string{}     // id -> text
+	currentLang = "en"                // en | zh
+	langTable   = native.Table{}      // id -> text
 	langValid   bool
 )
 
@@ -376,83 +229,61 @@ const (
 	iStatusReady       = "42"
 	iStatusMissing     = "43"
 	iStatusTemplate    = "44"
+
+	// personalisation
+	iLblKind        = "45"
+	iKindQR         = "46"
+	iKindCode128    = "47"
+	iKindCode39     = "48"
+	iKindEAN13      = "49"
+	iLblFg          = "50"
+	iLblBg          = "51"
+	iChkTransparent = "52"
+	iLblShape       = "53"
+	iShapeSquare    = "54"
+	iShapeRounded   = "55"
+	iShapeDot       = "56"
+	iShapeDiamond   = "57"
+	iLblEye         = "58"
+	iEyeSquare      = "59"
+	iEyeRounded     = "60"
+	iEyeCircle      = "61"
+	iLblEcc         = "62"
+	iLblCell        = "63"
+	iLblQuiet       = "64"
+	iLblBarWidth    = "65"
+	iLblBarHeight   = "66"
+	iBtnLogo        = "67"
+	iBtnLogoClear   = "68"
+	iLblLogoRatio   = "69"
+	iLblTopText     = "70"
+	iLblBottomText  = "71"
+	iLblBorder      = "72"
+	iBorderNone     = "73"
+	iBorderThin     = "74"
+	iBorderThick    = "75"
+	iLblBorderColor = "76"
+	iMsgBadColor    = "77"
+	iMsgRenderFail  = "78"
+	iDlgChooseLogo  = "79"
+	iMsgLogoInUse   = "80"
+	iMsgNeedQR      = "81"
 )
 
 func langPath(lang string) string {
 	return appPath(filepath.Join("resources", "cmd", lang+".lerf"))
 }
 
-// parseLerf reads a LERF document into an id -> text table.
-// Supported line forms: `<id>text<id>`, `key=value`, `# comment`, blank.
-func parseLerf(path string) (map[string]string, bool) {
-	table := map[string]string{}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return table, false
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if strings.HasPrefix(line, "<") {
-			close := strings.Index(line, ">")
-			if close < 0 {
-				continue
-			}
-			id := line[1:close]
-			body := line[close+1:]
-			if end := strings.LastIndex(body, "<"+id+">"); end >= 0 {
-				body = body[:end]
-			}
-			table[id] = body
-			continue
-		}
-		if eq := strings.Index(line, "="); eq > 0 {
-			table[line[:eq]] = line[eq+1:]
-		}
-	}
-	return table, len(table) > 0
-}
-
 // loadLang reloads the active language table, falling back to English.
 func loadLang() {
-	var ok bool
-	langTable, ok = parseLerf(langPath(currentLang))
-	langValid = ok
-	if !ok && currentLang != "en" {
-		langTable, langValid = parseLerf(langPath("en"))
-	}
+	langTable, langValid = native.LoadDir(appDir(), currentLang, "en")
 }
 
 // tr returns the localized text for an entry id, or the id itself when missing.
-func tr(id string) string {
-	if v, ok := langTable[id]; ok {
-		return v
-	}
-	return id
-}
+func tr(id string) string { return langTable.Get(id) }
 
 // trf is tr with {0}, {1}, ... placeholders substituted.
-func trf(id string, args ...string) string {
-	s := tr(id)
-	for i, a := range args {
-		s = strings.ReplaceAll(s, "{"+itoa(i)+"}", a)
-	}
-	return s
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	var b []byte
-	for i > 0 {
-		b = append([]byte{byte('0' + i%10)}, b...)
-		i /= 10
-	}
-	return string(b)
-}
+func trf(id string, args ...string) string { return langTable.Getf(id, args...) }
 
 // setLang switches the active language and persists the choice in settings.
 func setLang(lang string) {

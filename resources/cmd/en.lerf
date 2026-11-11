@@ -54,3 +54,41 @@ QRScanner.V1.0.0
 <42>ready<42>
 <43>not found<43>
 <44>Base dir: {0}\r\nlog.dll (logging + cache): {1}\r\nconfig.dll (settings, TMMF): {2}\r\ntmmf.dll (format parser): {3}\r\nlerf.dll (key-value parser): {4}\r\n\r\nSettings are saved to resources/cmd/settings.tmmf.<44>
+# personalisation
+<45>Code type:<45>
+<46>QR code<46>
+<47>Code 128 (1D)<47>
+<48>Code 39 (1D)<48>
+<49>EAN-13 (1D)<49>
+<50>Foreground colour:<50>
+<51>Background colour:<51>
+<52>Transparent background<52>
+<53>Module shape:<53>
+<54>Square<54>
+<55>Rounded<55>
+<56>Dot<56>
+<57>Diamond<57>
+<58>Finder eyes:<58>
+<59>Square<59>
+<60>Rounded<60>
+<61>Circle<61>
+<62>Error correction:<62>
+<63>Pixels per module:<63>
+<64>Quiet zone (modules):<64>
+<65>Bar width (px):<65>
+<66>Bar height (px):<66>
+<67>Choose avatar...<67>
+<68>Clear avatar<68>
+<69>Avatar size:<69>
+<70>Caption above:<70>
+<71>Caption below:<71>
+<72>Frame:<72>
+<73>None<73>
+<74>Thin<74>
+<75>Thick<75>
+<76>Frame colour:<76>
+<77>Colour must look like #RRGGBB<77>
+<78>Cannot build the symbol: {0}<78>
+<79>Select avatar image<79>
+<80>An avatar covers modules, so error correction was raised to H.<80>
+<81>An avatar can only be placed inside a QR code.<81>
