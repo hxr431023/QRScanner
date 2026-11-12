@@ -8,12 +8,11 @@ import (
 	"encoding/base32"
 	"fmt"
 	"image"
-	"image/color"
-	"image/png"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/makiuchi-d/gozxing"
 	"github.com/makiuchi-d/gozxing/oned"
 	"github.com/makiuchi-d/gozxing/qrcode"
-	"github.com/boombuler/barcode/qr"
 )
 
 var (
@@ -31,7 +29,7 @@ var (
 	genInput   *walk.LineEdit
 	genImg     *walk.ImageView
 	genPathLbl *walk.Label
-	currentQR  image.Image
+	currentPNG string // last render written by qrcore.dll
 
 	chkLogEnabled *walk.CheckBox
 	cmbFormat     *walk.ComboBox
@@ -60,10 +58,28 @@ var (
 )
 
 func main() {
-	initLog()
-	initConfig()
-	initTmmf()
-	initLerf()
+	// qrnative.dll carries the settings store, the language table and the log;
+	// qrcore.dll carries the renderer. Without them the GUI can still run but
+	// there is nothing to generate with, so that is reported at startup.
+	startErr := initNative()
+	if startErr == nil {
+		startErr = initCore()
+	}
+	if startErr != nil {
+		showFatal(startErr.Error())
+		return
+	}
+	// settings are read back through qrnative.dll before any control is built
+	if v := configGet("log_enabled"); v != "" {
+		logEnabled = v == "1" || v == "true"
+	}
+	setLogEnabled(logEnabled)
+	if v := configGet("output_format"); v != "" {
+		outputFormat = v
+	}
+	if v := configGet("language"); v == "zh" {
+		currentLang = "zh"
+	}
 	loadLang()
 	defer shutdownAll()
 
@@ -356,7 +372,7 @@ func refreshStatus() {
 		return tr(iStatusMissing)
 	}
 	statusLbl.SetText(trf(iStatusTemplate,
-		appDir(), on(logStore != nil), on(cfgStore != nil), on(tmmfDLL.Valid()), on(lerfDLL.Valid())))
+		appDir(), on(have(capLog)), on(have(capConfig)), on(have(capTmmf)), on(have(capLerf))))
 }
 
 // showFatal displays a startup error even when the GUI is unavailable.
@@ -551,87 +567,118 @@ func textOr(le *walk.LineEdit) string {
 	return strings.TrimSpace(le.Text())
 }
 
-// collectStyle reads every personalisation control into one StyleOptions.
-func collectStyle() StyleOptions {
-	o := DefaultStyle()
+// collectStyle reads every personalisation control into the key=value map that
+// qrcore.dll parses. The keys are the same ones written to settings.tmmf, so
+// saving and restoring the look needs no second vocabulary.
+func collectStyle() map[string]string {
+	m := map[string]string{
+		"code_kind":    "qr",
+		"fg_color":     "#000000",
+		"bg_color":     "#FFFFFF",
+		"transparent":  "0",
+		"shape":        "square",
+		"eye":          "square",
+		"ecc":          "M",
+		"cell":         "10",
+		"quiet":        "4",
+		"bar_width":    "2",
+		"bar_height":   "140",
+		"border":       "none",
+		"border_color": "#000000",
+		"logo_ratio":   "0.22",
+	}
 	switch comboIndex(cmbKind, 0) {
 	case 1:
-		o.Kind = "code128"
+		m["code_kind"] = "code128"
 	case 2:
-		o.Kind = "code39"
+		m["code_kind"] = "code39"
 	case 3:
-		o.Kind = "ean13"
-	default:
-		o.Kind = "qr"
+		m["code_kind"] = "ean13"
 	}
-	if c, err := ParseHexColor(textOr(edFg)); err == nil {
-		o.Foreground = c
+	if s := textOr(edFg); s != "" {
+		m["fg_color"] = s
 	}
-	if c, err := ParseHexColor(textOr(edBg)); err == nil {
-		o.Background = c
+	if s := textOr(edBg); s != "" {
+		m["bg_color"] = s
 	}
-	if c, err := ParseHexColor(textOr(edBorderCol)); err == nil {
-		o.BorderColor = c
+	if s := textOr(edBorderCol); s != "" {
+		m["border_color"] = s
 	}
-	o.Transparent = chkTrans != nil && chkTrans.Checked()
+	if chkTrans != nil && chkTrans.Checked() {
+		m["transparent"] = "1"
+	}
 
 	switch comboIndex(cmbShape, 0) {
 	case 1:
-		o.Shape = "rounded"
+		m["shape"] = "rounded"
 	case 2:
-		o.Shape = "dot"
+		m["shape"] = "dot"
 	case 3:
-		o.Shape = "diamond"
+		m["shape"] = "diamond"
 	}
 	switch comboIndex(cmbEye, 0) {
 	case 1:
-		o.Eye = "rounded"
+		m["eye"] = "rounded"
 	case 2:
-		o.Eye = "circle"
+		m["eye"] = "circle"
 	}
 	switch comboIndex(cmbECC, 1) {
 	case 0:
-		o.ECC = qr.L
+		m["ecc"] = "L"
 	case 2:
-		o.ECC = qr.Q
+		m["ecc"] = "Q"
 	case 3:
-		o.ECC = qr.H
-	default:
-		o.ECC = qr.M
+		m["ecc"] = "H"
 	}
 	switch comboIndex(cmbBorder, 0) {
 	case 1:
-		o.Border = "thin"
+		m["border"] = "thin"
 	case 2:
-		o.Border = "thick"
+		m["border"] = "thick"
 	}
 	switch comboIndex(cmbLogoRate, 1) {
 	case 0:
-		o.LogoRatio = 0.16
+		m["logo_ratio"] = "0.16"
 	case 2:
-		o.LogoRatio = 0.28
+		m["logo_ratio"] = "0.28"
 	case 3:
-		o.LogoRatio = 0.33
-	default:
-		o.LogoRatio = 0.22
+		m["logo_ratio"] = "0.33"
 	}
-	o.Cell = atoiOr(edCell, 10)
-	o.Quiet = atoiOr(edQuiet, 4)
-	o.BarWidth = atoiOr(edBarW, 2)
-	o.BarHeight = atoiOr(edBarH, 140)
-	o.TopText = textOr(edTopText)
-	o.BottomText = textOr(edBotText)
-	o.LogoPath = logoPath
-	return o
+	m["cell"] = strconv.Itoa(atoiOr(edCell, 10))
+	m["quiet"] = strconv.Itoa(atoiOr(edQuiet, 4))
+	m["bar_width"] = strconv.Itoa(atoiOr(edBarW, 2))
+	m["bar_height"] = strconv.Itoa(atoiOr(edBarH, 140))
+	m["top_text"] = textOr(edTopText)
+	m["bottom_text"] = textOr(edBotText)
+	if logoPath != "" {
+		m["logo_path"] = logoPath
+	}
+	return m
+}
+
+// specText renders the map as the "key=value" block qrcore.dll expects.
+func specText(m map[string]string) string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		// a newline inside a value would break the line format
+		v := strings.NewReplacer("\r", " ", "\n", " ").Replace(m[k])
+		b.WriteString(k)
+		b.WriteString("=")
+		b.WriteString(v)
+		b.WriteString("\n")
+	}
+	return b.String()
 }
 
 // styleKey is the cache key fragment so a styled result is not confused with a
 // plain one.
-func styleKey(o StyleOptions) string {
-	return fmt.Sprintf("%s|%v|%v|%v|%s|%s|%s|%d|%d|%d|%d|%s|%s|%s|%v|%s|%.2f",
-		o.Kind, o.Foreground, o.Background, o.Transparent, o.Shape, o.Eye, o.ECC.String(),
-		o.Cell, o.Quiet, o.BarWidth, o.BarHeight, o.TopText, o.BottomText,
-		o.Border, o.BorderColor, o.LogoPath, o.LogoRatio)
+func styleKey(m map[string]string) string {
+	return specText(m)
 }
 
 func generateCode() {
@@ -642,13 +689,14 @@ func generateCode() {
 	}
 
 	o := collectStyle()
-	if o.LogoPath != "" && o.Kind != "qr" {
+	if logo := o["logo_path"]; logo != "" && o["code_kind"] != "qr" {
 		walk.MsgBox(mw, tr(iErrTitle), tr(iMsgNeedQR), walk.MsgBoxIconWarning)
-		o.LogoPath = ""
+		delete(o, "logo_path")
 	}
-	if o.LogoPath != "" && o.ECC < qr.Q {
+	// an avatar covers real modules, so the symbol needs spare capacity
+	if o["logo_path"] != "" && (o["ecc"] == "L" || o["ecc"] == "M") {
 		walk.MsgBox(mw, tr(iErrTitle), tr(iMsgLogoInUse), walk.MsgBoxIconInformation)
-		o.ECC = qr.H
+		o["ecc"] = "H"
 	}
 
 	key := input + "|" + styleKey(o)
@@ -679,72 +727,48 @@ func generateCode() {
 	logWrite("generate", input+" -> "+fmt.Sprint(len(data)))
 }
 
-func renderAndShow(data string, o StyleOptions) {
-	img, err := RenderCode(data, o)
-	if err != nil {
+// renderAndShow hands the request to qrcore.dll, which writes the PNG itself.
+func renderAndShow(data string, o map[string]string) {
+	target := filepath.Join(os.TempDir(), "qr_preview.png")
+	if err := renderToFile(specText(o), data, target); err != nil {
 		walk.MsgBox(mw, tr(iErrTitle), trf(iMsgRenderFail, err.Error()), walk.MsgBoxIconError)
 		return
 	}
-	currentQR = img
-	if err := showImage(img); err != nil {
+	if err := showImage(target); err != nil {
 		walk.MsgBox(mw, tr(iErrTitle), err.Error(), walk.MsgBoxIconError)
 		return
 	}
+	currentPNG = target
 	saveStyle(o)
 }
 
-// showImage writes the render to a temp PNG and hands it to the image view.
-func showImage(img image.Image) error {
-	tmp := filepath.Join(os.TempDir(), "qr_preview.png")
-	f, err := os.Create(tmp)
-	if err != nil {
-		return err
-	}
-	if err := png.Encode(f, img); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-
-	bmp, err := walk.NewBitmapFromFile(tmp)
+// showImage loads the PNG the renderer produced into the image view.
+func showImage(path string) error {
+	bmp, err := walk.NewBitmapFromFile(path)
 	if err != nil {
 		return err
 	}
 	return genImg.SetImage(bmp)
 }
 
-func hexOf(c color.RGBA) string {
-	return fmt.Sprintf("#%02X%02X%02X", c.R, c.G, c.B)
-}
-
 // saveStyle keeps the last used look in the TMMF settings, so the next launch
 // opens with the same controls.
-func saveStyle(o StyleOptions) {
-	if cfgStore == nil {
-		return
+func saveStyle(o map[string]string) {
+	for _, k := range []string{
+		"code_kind", "fg_color", "bg_color", "transparent", "shape", "eye", "ecc",
+		"cell", "quiet", "bar_width", "bar_height", "top_text", "bottom_text",
+		"border", "border_color", "logo_ratio",
+	} {
+		if v, ok := o[k]; ok {
+			configSet(k, v)
+		}
 	}
-	configSet("code_kind", o.Kind)
-	configSet("fg_color", hexOf(o.Foreground))
-	configSet("bg_color", hexOf(o.Background))
-	configSet("transparent", boolStr(o.Transparent))
-	configSet("shape", o.Shape)
-	configSet("eye", o.Eye)
-	configSet("ecc", o.ECC.String())
-	configSet("cell", strconv.Itoa(o.Cell))
-	configSet("quiet", strconv.Itoa(o.Quiet))
-	configSet("bar_width", strconv.Itoa(o.BarWidth))
-	configSet("bar_height", strconv.Itoa(o.BarHeight))
-	configSet("top_text", o.TopText)
-	configSet("bottom_text", o.BottomText)
-	configSet("border", o.Border)
-	configSet("border_color", hexOf(o.BorderColor))
-	configSet("logo_ratio", fmt.Sprintf("%.2f", o.LogoRatio))
 	configSave()
 }
 
 // applySavedStyle restores the controls from the settings file on startup.
 func applySavedStyle() {
-	if cfgStore == nil {
+	if !have(capConfig) {
 		return
 	}
 	setEdit := func(le *walk.LineEdit, key string) {
@@ -832,7 +856,7 @@ func applySavedStyle() {
 }
 
 func saveQR() {
-	if currentQR == nil {
+	if currentPNG == "" {
 		walk.MsgBox(mw, tr(iErrTitle), tr(iMsgNoQr), walk.MsgBoxIconWarning)
 		return
 	}
@@ -843,13 +867,12 @@ func saveQR() {
 	if ok, err := dlg.ShowSave(mw); err != nil || !ok {
 		return
 	}
-	f, err := os.Create(dlg.FilePath)
+	data, err := os.ReadFile(currentPNG)
 	if err != nil {
 		walk.MsgBox(mw, tr(iErrTitle), err.Error(), walk.MsgBoxIconError)
 		return
 	}
-	defer f.Close()
-	if err := png.Encode(f, currentQR); err != nil {
+	if err := os.WriteFile(dlg.FilePath, data, 0644); err != nil {
 		walk.MsgBox(mw, tr(iErrTitle), err.Error(), walk.MsgBoxIconError)
 		return
 	}

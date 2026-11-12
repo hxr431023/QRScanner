@@ -92,3 +92,5 @@ QRScanner.V1.0.0
 <79>选择头像图片<79>
 <80>头像会遮挡模块，容错等级已提升到 H。<80>
 <81>头像只能放在二维码里。<81>
+<82>本程序需要与 qrscanner.exe 同目录的 qrcore.dll 与 qrnative.dll。<82>
+<83>渲染与通用层已拆分为 qrcore.dll / qrnative.dll，缺少时无法在窗口里生成图形。<83>

@@ -1,4 +1,4 @@
-package main
+package style
 
 // style.go — 本文件为 QRScanner 自己写的代码，不是微软的代码，也不含任何微软源码。
 // style.go — written for this project; no Microsoft code is contained here.

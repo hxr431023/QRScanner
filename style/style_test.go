@@ -1,4 +1,4 @@
-package main
+package style
 
 // style_test.go — 本文件为 QRScanner 自己写的代码，不是微软的代码。
 // It renders a few personalised symbols and decodes them again with gozxing,
