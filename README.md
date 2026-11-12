@@ -10,10 +10,12 @@ carrying a GUI along.
 
 ## Download / Run
 
-Get `qrscanner.exe`, `qrcore.dll` and `qrnative.dll` from the
-[releases page](https://github.com/hxr431023/QRScanner/releases) and put them in one
-folder together with `config.dll`, `lerf.dll`, `log.dll`, `tmmf.dll` and the
-`resources\` folder, then double-click the exe. No installer and no runtime required.
+Get all seven files from the
+[releases page](https://github.com/hxr431023/QRScanner/releases) —
+`qrscanner.exe`, `qrcore.dll`, `qrnative.dll`, `config.dll`, `lerf.dll`, `log.dll`
+and `tmmf.dll` — and put them in one folder together with the `resources\` folder,
+then double-click the exe. Everything the program needs is attached to the release,
+so nothing has to be fetched from anywhere else. No installer and no runtime required.
 
 All DLLs are loaded **only** from the directory containing `qrscanner.exe`. Absolute
 paths are never hard-coded, so you can clone this repository anywhere and run it —
